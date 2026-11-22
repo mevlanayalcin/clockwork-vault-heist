@@ -1,4 +1,4 @@
-// Exact 2D raycast vision cones, smoke occlusion, cover shadows, and volumetric lighting shaders.
+// Exact 2D raycast visibility cones, smoke occlusion, shadow-cover checks, and segment math.
 
 export function normalizeAngle(a) {
   while (a > Math.PI) a -= Math.PI * 2;
@@ -8,7 +8,7 @@ export function normalizeAngle(a) {
 
 export function collectOpaqueSegments(walls, props) {
   const segs = [];
-  const pushRect = (r) => {
+  const addRect = (r) => {
     const x1 = r.x;
     const y1 = r.y;
     const x2 = r.x + r.w;
@@ -18,13 +18,13 @@ export function collectOpaqueSegments(walls, props) {
     segs.push({ x1: x2, y1: y2, x2: x1, y2 });
     segs.push({ x1, y1: y2, x2: x1, y2: y1 });
   };
-  for (const w of walls) pushRect(w);
-  for (const p of props) pushRect(p);
+  for (const w of walls) addRect(w);
+  for (const p of props) addRect(p);
   return segs;
 }
 
 export function castRay(ox, oy, dx, dy, maxDist, segments, smokes) {
-  let bestT = maxDist;
+  let best = maxDist;
   for (let i = 0; i < segments.length; i++) {
     const s = segments[i];
     const sx = s.x2 - s.x1;
@@ -34,9 +34,9 @@ export function castRay(ox, oy, dx, dy, maxDist, segments, smokes) {
     const qpx = s.x1 - ox;
     const qpy = s.y1 - oy;
     const t = (qpx * sy - qpy * sx) / denom;
-    if (t <= 0 || t >= bestT) continue;
+    if (t <= 0 || t >= best) continue;
     const u = (qpx * dy - qpy * dx) / denom;
-    if (u >= -1e-6 && u <= 1 + 1e-6) bestT = t;
+    if (u >= -1e-6 && u <= 1 + 1e-6) best = t;
   }
 
   if (smokes && smokes.length > 0) {
@@ -49,26 +49,24 @@ export function castRay(ox, oy, dx, dy, maxDist, segments, smokes) {
       const b = 2 * (fx * dx + fy * dy);
       const q = fx * fx + fy * fy - r * r;
       if (q <= 0) {
-        bestT = Math.min(bestT, 12);
+        best = Math.min(best, 10);
         continue;
       }
       const disc = b * b - 4 * q;
       if (disc < 0) continue;
       const t = (-b - Math.sqrt(disc)) * 0.5;
-      if (t > 0 && t < bestT) bestT = t;
+      if (t > 0 && t < best) best = t;
     }
   }
-  return bestT;
+  return best;
 }
 
 export function castVisionCone(ox, oy, angle, halfFov, range, segments, smokes) {
   const offsets = [];
-  const steps = 42;
-  for (let i = 0; i <= steps; i++) {
-    offsets.push(-halfFov + (i / steps) * (halfFov * 2));
-  }
+  const steps = 40;
+  for (let i = 0; i <= steps; i++) offsets.push(-halfFov + (i / steps) * (halfFov * 2));
 
-  const rSq = (range + 20) * (range + 20);
+  const rSq = (range + 18) * (range + 18);
   const tryVertex = (vx, vy) => {
     const dx = vx - ox;
     const dy = vy - oy;
@@ -80,11 +78,9 @@ export function castVisionCone(ox, oy, angle, halfFov, range, segments, smokes) 
       offsets.push(Math.min(halfFov, rel + 0.0008));
     }
   };
-
   for (let i = 0; i < segments.length; i++) {
-    const s = segments[i];
-    tryVertex(s.x1, s.y1);
-    tryVertex(s.x2, s.y2);
+    tryVertex(segments[i].x1, segments[i].y1);
+    tryVertex(segments[i].x2, segments[i].y2);
   }
   offsets.sort((a, b) => a - b);
 
@@ -108,19 +104,23 @@ export function hasLineOfSight(ax, ay, bx, by, segments, smokes) {
   const dy = by - ay;
   const dist = Math.hypot(dx, dy);
   if (dist < 1e-4) return true;
-  const hit = castRay(ax, ay, dx / dist, dy / dist, dist, segments, smokes);
-  return hit >= dist - 2.5;
+  return castRay(ax, ay, dx / dist, dy / dist, dist, segments, smokes) >= dist - 2.5;
 }
 
-export function findAdjacentCover(px, py, props, smokes) {
+export function findShadowCover(px, py, alcoves, props, smokes) {
   if (smokes) {
     for (const s of smokes) {
-      if (s.alpha > 0.2 && Math.hypot(px - s.x, py - s.y) <= s.radius * 0.94) {
+      if (s.alpha > 0.2 && Math.hypot(px - s.x, py - s.y) <= s.radius * 0.92) {
         return { inCover: true, kind: 'smoke', prop: null };
       }
     }
   }
-  const pad = 28;
+  for (const a of alcoves) {
+    if (px >= a.x - 4 && px <= a.x + a.w + 4 && py >= a.y - 4 && py <= a.y + a.h + 4) {
+      return { inCover: true, kind: 'alcove', prop: null };
+    }
+  }
+  const pad = 26;
   for (const p of props) {
     if (px >= p.x - pad && px <= p.x + p.w + pad && py >= p.y - pad && py <= p.y + p.h + pad) {
       return { inCover: true, kind: p.kind, prop: p };
@@ -129,22 +129,22 @@ export function findAdjacentCover(px, py, props, smokes) {
   return { inCover: false, kind: null, prop: null };
 }
 
-export function canObserverSeeTarget(obs, tx, ty, concealed, segments, smokes) {
+export function canSeePoint(obs, tx, ty, concealed, segments, smokes) {
   const dx = tx - obs.x;
   const dy = ty - obs.y;
   const dist = Math.hypot(dx, dy);
-  const effectiveRange = concealed ? Math.min(76, obs.range * 0.34) : obs.range;
-  if (dist > effectiveRange) return false;
-  const rel = Math.abs(normalizeAngle(Math.atan2(dy, dx) - obs.angle));
-  if (rel > obs.halfFov) return false;
+  const maxR = concealed ? Math.min(68, obs.range * 0.34) : obs.range;
+  if (dist > maxR) return false;
+  if (Math.abs(normalizeAngle(Math.atan2(dy, dx) - obs.angle)) > obs.halfFov) return false;
   return hasLineOfSight(obs.x, obs.y, tx, ty, segments, smokes);
 }
 
-export function propagateAcousticAlert(originX, originY, radius, guards) {
-  const alerted = [];
-  for (const g of guards) {
-    const d = Math.hypot(g.x - originX, g.y - originY);
-    if (d <= radius) alerted.push({ guard: g, distance: d });
-  }
-  return alerted;
+export function pointToSegmentDist(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy || 1;
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+  const cx = x1 + dx * t;
+  const cy = y1 + dy * t;
+  return { dist: Math.hypot(px - cx, py - cy), cx, cy };
 }

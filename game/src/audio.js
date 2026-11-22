@@ -80,7 +80,7 @@ export function createAudioEngine() {
         beatAcc = 0;
         const note = bassNotes[beatStep % bassNotes.length] * (alarm >= 60 ? 1.12 : 1.0);
         beatStep++;
-        tone(note, 0.22, 'triangle', 0.032 + (alarm / 100) * 0.026, note * 0.96);
+        tone(note, 0.22, 'triangle', 0.032 + (alarm / 100) * 0.025, note * 0.96);
         tone(1240 + alarm * 5, 0.02, 'square', 0.008);
       }
     },

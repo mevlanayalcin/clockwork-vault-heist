@@ -1,14 +1,15 @@
-// Guard patrol AI, sweeping CCTV cameras, alarm escalation, and fair 1.2s caught-grace lock-on.
+// Articulated guard patrol AI, wall CCTV camera sweeps, laser tripwires, and 1.2s caught grace.
 
-import { canObserverSeeTarget, castVisionCone, normalizeAngle } from './visibility.js';
+import { canObserverSeeTarget, castVisionCone, normalizeAngle } from './lighting.js';
 
 export const CAUGHT_GRACE_SECONDS = 1.2;
 
 export function getAlarmTier(alarm) {
-  if (alarm >= 85) return { code: 'LOCKDOWN', color: '#ff3b4f', pulse: 2.8 };
-  if (alarm >= 52) return { code: 'SWEEPING', color: '#ff7a2f', pulse: 1.9 };
-  if (alarm >= 25) return { code: 'CAUTIOUS', color: '#f5b83d', pulse: 1.2 };
-  return { code: 'UNDETECTED', color: '#39d9b6', pulse: 0.7 };
+  if (alarm >= 85) return { code: 'LOCKDOWN', color: '#ff384f' };
+  if (alarm >= 68) return { code: 'HUNTING', color: '#ff4f46' };
+  if (alarm >= 45) return { code: 'SWEEPING', color: '#ff9036' };
+  if (alarm >= 22) return { code: 'CAUTIOUS', color: '#f6c445' };
+  return { code: 'UNDETECTED', color: '#39e5b6' };
 }
 
 export function createGuards(blueprints) {
@@ -21,7 +22,7 @@ export function createGuards(blueprints) {
       name: bp.name,
       x: start.x,
       y: start.y,
-      radius: 14,
+      radius: 17,
       angle: initAngle,
       targetAngle: initAngle,
       speed: bp.speed,
@@ -35,8 +36,9 @@ export function createGuards(blueprints) {
       alertTimer: 0,
       investigatePos: null,
       stuckTimer: 0,
-      bark: bp.bark,
-      barkTimer: 4.5 + idx * 1.4,
+      stride: idx * 1.3,
+      bark: '',
+      barkTimer: 0,
       conePoly: [],
     };
   });
@@ -53,6 +55,11 @@ export function createCameras(blueprints) {
   }));
 }
 
+export function setGuardBark(guard, text, duration = 2.8) {
+  guard.bark = text;
+  guard.barkTimer = duration;
+}
+
 function turnToward(current, target, maxStep) {
   const diff = normalizeAngle(target - current);
   if (Math.abs(diff) <= maxStep) return target;
@@ -65,13 +72,11 @@ function moveWithSlide(entity, tx, ty, speed, dt, solidRects) {
   const dist = Math.hypot(dx, dy);
   if (dist < 2) return { arrived: true, moved: 0 };
   const step = Math.min(dist, speed * dt);
-  const vx = (dx / dist) * step;
-  const vy = (dy / dist) * step;
   const prevX = entity.x;
   const prevY = entity.y;
 
-  entity.x += vx;
-  entity.y += vy;
+  entity.x += (dx / dist) * step;
+  entity.y += (dy / dist) * step;
   for (const r of solidRects) {
     const cx = Math.max(r.x, Math.min(entity.x, r.x + r.w));
     const cy = Math.max(r.y, Math.min(entity.y, r.y + r.h));
@@ -89,9 +94,18 @@ function moveWithSlide(entity, tx, ty, speed, dt, solidRects) {
   return { arrived: Math.hypot(tx - entity.x, ty - entity.y) < 8, moved };
 }
 
-export function setGuardBark(guard, text, duration = 3.2) {
-  guard.bark = text;
-  guard.barkTimer = duration;
+export function recomputeSecurityCones(state) {
+  for (const cam of state.cameras) {
+    cam.conePoly =
+      cam.offlineTimer > 0
+        ? []
+        : castVisionCone(cam.x, cam.y, cam.angle, cam.halfFov, cam.range, state.opaqueSegments, state.smokes);
+  }
+  for (const g of state.guards) {
+    const ox = g.x + Math.cos(g.angle) * 14;
+    const oy = g.y + Math.sin(g.angle) * 14;
+    g.conePoly = castVisionCone(ox, oy, g.angle, g.halfFov, g.range, state.opaqueSegments, state.smokes);
+  }
 }
 
 export function stepSecurity(state, dt, segments, solidRects, audio) {
@@ -100,7 +114,7 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
   let anyObserverSees = false;
   let primarySpotter = null;
 
-  // 1. Update CCTV cameras
+  // 1. Update sweeping CCTV cameras
   for (const cam of cameras) {
     if (cam.offlineTimer > 0) {
       cam.offlineTimer = Math.max(0, cam.offlineTimer - dt);
@@ -109,8 +123,8 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
       cam.conePoly = [];
       continue;
     }
-    const alarmSpeedBoost = 1 + (state.alarm / 100) * 0.42;
-    const wave = Math.sin((state.time * alarmSpeedBoost) * ((Math.PI * 2) / cam.period) + cam.phase);
+    const alarmSpeedBoost = 1 + (state.alarm / 100) * 0.4;
+    const wave = Math.sin(state.time * alarmSpeedBoost * ((Math.PI * 2) / cam.period) + cam.phase);
     cam.angle = cam.baseAngle + wave * cam.sweep;
     cam.conePoly = castVisionCone(cam.x, cam.y, cam.angle, cam.halfFov, cam.range, segments, smokes);
 
@@ -127,13 +141,12 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
     }
   }
 
-  // 2. Check active laser tripwires
+  // 2. Check active laser gates
   for (const laser of lasers) {
     if (laser.disabled || laser.empTimer > 0) {
       if (laser.empTimer > 0) laser.empTimer = Math.max(0, laser.empTimer - dt);
       continue;
     }
-    // Distance from player to laser segment
     const ldx = laser.x2 - laser.x1;
     const ldy = laser.y2 - laser.y1;
     const lenSq = ldx * ldx + ldy * ldy || 1;
@@ -142,21 +155,20 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
     const py = laser.y1 + ldy * t;
     if (Math.hypot(player.x - px, player.y - py) < player.radius + 3) {
       state.alarm = Math.min(100, state.alarm + dt * 65);
-      state.caughtGrace = Math.min(CAUGHT_GRACE_SECONDS, state.caughtGrace + dt * 1.8);
+      state.caughtGrace = Math.min(CAUGHT_GRACE_SECONDS, state.caughtGrace + dt * 1.75);
       state.lastSeen = { x: player.x, y: player.y, timer: 6.0 };
       anyObserverSees = true;
       primarySpotter = { kind: 'laser', x: px, y: py, label: laser.label };
-      state.flashBanner = { text: 'LASER TRIPPED! STEP BACK OR [3] SMOKE!', color: '#ff4258', timer: 1.1 };
+      state.flashBanner = { text: 'LASER TRIPPED! PULL BACK OR [3] SMOKE!', color: '#ff4860', timer: 1.1 };
       audio?.playAlarmPing();
     }
   }
 
-  // 3. Update guards
-  const speedScale = 1 + (state.alarm >= 52 ? 0.16 : 0);
+  // 3. Update articulated guards
+  const speedScale = 1 + (state.alarm >= 45 ? 0.16 : 0);
   for (const g of guards) {
     if (g.barkTimer > 0) g.barkTimer = Math.max(0, g.barkTimer - dt);
 
-    // Check active decoys luring guard
     let activeDecoy = null;
     for (const d of decoys) {
       if (d.timer > 0 && Math.hypot(g.x - d.x, g.y - d.y) <= d.lureRadius) {
@@ -170,19 +182,19 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
       anyObserverSees = true;
       primarySpotter = { kind: 'guard', x: g.x, y: g.y, label: g.name };
       const dist = Math.hypot(player.x - g.x, player.y - g.y);
-      const rate = dist < 110 ? 1.85 : 1.18;
+      const rate = dist < 120 ? 1.85 : 1.18;
       g.suspicion = Math.min(1, g.suspicion + dt * rate);
       g.targetAngle = Math.atan2(player.y - g.y, player.x - g.x);
       g.investigatePos = { x: player.x, y: player.y };
       state.lastSeen = { x: player.x, y: player.y, timer: 6.5 };
 
       if (g.state !== 'ALERT') {
-        g.state = g.suspicion > 0.42 ? 'ALERT' : 'SUSPICIOUS';
+        g.state = g.suspicion > 0.4 ? 'ALERT' : 'SUSPICIOUS';
         if (g.state === 'ALERT') {
           setGuardBark(g, 'Intruder spotted!', 2.6);
           audio?.playSpotSting();
-        } else if (g.barkTimer <= 0.2) {
-          setGuardBark(g, 'Hold—movement!', 2.2);
+        } else if (g.barkTimer <= 0.1) {
+          setGuardBark(g, 'Hold—movement!', 2.0);
         }
       }
       g.alertTimer = 4.2;
@@ -192,7 +204,7 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
       if (activeDecoy && g.state !== 'ALERT') {
         if (g.state !== 'DISTRACTED') {
           g.state = 'DISTRACTED';
-          setGuardBark(g, "What's ticking?", 3.4);
+          setGuardBark(g, "What's ticking?", 3.0);
         }
         g.investigatePos = { x: activeDecoy.x, y: activeDecoy.y };
         g.alertTimer = 2.8;
@@ -200,28 +212,24 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
         g.alertTimer -= dt;
         if (g.alertTimer <= 0) {
           g.state = 'SEARCH';
-          g.alertTimer = 3.2;
-          setGuardBark(g, 'Lost visual — sweeping', 2.4);
+          g.alertTimer = 3.0;
         }
       } else if (g.state === 'SEARCH' || g.state === 'DISTRACTED') {
         g.alertTimer -= dt;
         if (g.alertTimer <= 0) {
           g.state = 'PATROL';
           g.investigatePos = null;
-          setGuardBark(g, 'Returning to route', 2.2);
         }
       }
     }
 
-    // Movement & orientation per state
     if (g.state === 'PATROL') {
       const wp = g.waypoints[g.wpIndex];
       const dist = Math.hypot(wp.x - g.x, wp.y - g.y);
-      if (dist < 7) {
+      if (dist < 8) {
         if (g.waitTimer > 0) {
           g.waitTimer -= dt;
-          const sweepOsc = Math.sin(state.time * 1.9 + g.wpIndex) * 0.28;
-          g.targetAngle = (wp.look ?? g.angle) + sweepOsc;
+          g.targetAngle = (wp.look ?? g.angle) + Math.sin(state.time * 1.9 + g.wpIndex) * 0.28;
         } else {
           g.wpIndex = (g.wpIndex + 1) % g.waypoints.length;
           const nextWp = g.waypoints[g.wpIndex];
@@ -230,16 +238,18 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
         }
       } else {
         g.targetAngle = Math.atan2(wp.y - g.y, wp.x - g.x);
-        moveWithSlide(g, wp.x, wp.y, g.speed * speedScale, dt, solidRects);
+        const res = moveWithSlide(g, wp.x, wp.y, g.speed * speedScale, dt, solidRects);
+        g.stride += res.moved * 0.14;
       }
       g.angle = turnToward(g.angle, g.targetAngle, dt * 3.4);
     } else if (g.investigatePos) {
       const aim = Math.atan2(g.investigatePos.y - g.y, g.investigatePos.x - g.x);
       g.angle = turnToward(g.angle, aim, dt * 5.2);
       const chaseSpeed = g.state === 'ALERT' ? g.speed * 1.24 : g.speed * 0.92;
-      const stopDist = g.state === 'DISTRACTED' ? 38 : 26;
+      const stopDist = g.state === 'DISTRACTED' ? 44 : 30;
       if (Math.hypot(g.investigatePos.x - g.x, g.investigatePos.y - g.y) > stopDist) {
         const res = moveWithSlide(g, g.investigatePos.x, g.investigatePos.y, chaseSpeed, dt, solidRects);
+        g.stride += res.moved * 0.15;
         g.stuckTimer = res.moved < 0.4 ? g.stuckTimer + dt : 0;
         if (g.stuckTimer > 1.2) {
           g.state = 'SEARCH';
@@ -247,16 +257,16 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
           g.stuckTimer = 0;
         }
       } else {
-        // Sweep search head
         g.angle = normalizeAngle(g.angle + Math.sin(state.time * 4.4) * dt * 2.2);
       }
     }
 
-    // Recompute exact raycast cone polygon (clipped to walls, plinths, and smoke clouds!)
-    g.conePoly = castVisionCone(g.x, g.y, g.angle, g.halfFov, g.range, segments, smokes);
+    const ox = g.x + Math.cos(g.angle) * 14;
+    const oy = g.y + Math.sin(g.angle) * 14;
+    g.conePoly = castVisionCone(ox, oy, g.angle, g.halfFov, g.range, segments, smokes);
   }
 
-  // 4. Fair 1.2s Caught-Grace Lock-On System (never cheap instant fail!)
+  // 4. Fair 1.2s caught-grace lock-on
   if (anyObserverSees) {
     state.spottedBy = primarySpotter;
     state.caughtGrace = Math.min(CAUGHT_GRACE_SECONDS, state.caughtGrace + dt);
@@ -268,10 +278,8 @@ export function stepSecurity(state, dt, segments, solidRects, audio) {
   } else {
     state.spottedBy = null;
     state.caughtGrace = Math.max(0, state.caughtGrace - dt * 1.45);
-    // Gentle alarm decay when completely unseen & below lockdown
     if (state.alarm > 0 && state.alarm < 95) {
-      const decay = state.lootSecured ? 1.8 : 3.2;
-      state.alarm = Math.max(0, state.alarm - dt * decay);
+      state.alarm = Math.max(0, state.alarm - dt * (state.lootSecured ? 1.8 : 3.2));
     }
   }
 

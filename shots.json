@@ -1,6 +1,6 @@
 [
   { "name": "1-heist-infiltration.jpg", "query": "?shot=infiltration" },
-  { "name": "2-tool-breach-alarm.jpg", "query": "?shot=breach" },
-  { "name": "3-caught-fair-recovery.jpg", "query": "?shot=caught" },
+  { "name": "2-emerald-emp-breach.jpg", "query": "?shot=emerald-emp" },
+  { "name": "3-treasury-smoke-escape.jpg", "query": "?shot=treasury-smoke" },
   { "name": "4-getaway-payoff.jpg", "query": "?shot=getaway" }
 ]

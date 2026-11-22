@@ -1,9 +1,11 @@
-// 100% procedural Web Audio API heist foley and clockwork tension soundscape.
+// 100% procedural Web Audio API stealth-noir upright bass pulse, clockwork ticks, and heist foley.
 
 export function createAudioEngine() {
   let ctx = null;
   let muted = false;
-  let pulseAcc = 0;
+  let beatAcc = 0;
+  let beatStep = 0;
+  const bassNotes = [82.41, 98.0, 110.0, 92.5, 82.41, 73.42, 82.41, 98.0];
 
   function ensure() {
     if (muted) return null;
@@ -16,9 +18,7 @@ export function createAudioEngine() {
         return null;
       }
     }
-    if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {});
-    }
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     return ctx;
   }
 
@@ -74,20 +74,21 @@ export function createAudioEngine() {
     },
     tickTension(alarm, dt) {
       if (muted || !ctx || ctx.state !== 'running') return;
-      const interval = Math.max(0.28, 0.92 - (alarm / 100) * 0.62);
-      pulseAcc += dt;
-      if (pulseAcc >= interval) {
-        pulseAcc = 0;
-        const base = 72 + alarm * 0.6;
-        tone(base, 0.07, 'triangle', 0.025 + (alarm / 100) * 0.03, base * 0.72);
-        tone(1180 + alarm * 6, 0.022, 'square', 0.008);
+      const interval = Math.max(0.28, 0.78 - (alarm / 100) * 0.48);
+      beatAcc += dt;
+      if (beatAcc >= interval) {
+        beatAcc = 0;
+        const note = bassNotes[beatStep % bassNotes.length] * (alarm >= 60 ? 1.12 : 1.0);
+        beatStep++;
+        tone(note, 0.22, 'triangle', 0.032 + (alarm / 100) * 0.026, note * 0.96);
+        tone(1240 + alarm * 5, 0.02, 'square', 0.008);
       }
     },
     playFootstep(loud) {
-      noiseBurst(loud ? 0.07 : 0.04, loud ? 420 : 280, loud ? 0.05 : 0.022);
+      noiseBurst(loud ? 0.065 : 0.038, loud ? 440 : 290, loud ? 0.05 : 0.022);
     },
     playTumblerClick() {
-      tone(980, 0.035, 'triangle', 0.045, 1420);
+      tone(1040, 0.035, 'triangle', 0.048, 1480);
     },
     playLootSecured() {
       tone(523.25, 0.16, 'triangle', 0.08, null, 0);
@@ -96,8 +97,8 @@ export function createAudioEngine() {
       tone(1046.5, 0.36, 'sine', 0.09, null, 0.24);
     },
     playEmp() {
-      tone(180, 0.42, 'sawtooth', 0.11, 36);
-      noiseBurst(0.28, 1600, 0.07);
+      tone(185, 0.44, 'sawtooth', 0.11, 34);
+      noiseBurst(0.3, 1700, 0.075);
     },
     playDecoy() {
       tone(1320, 0.12, 'sine', 0.06, null, 0);
@@ -105,7 +106,7 @@ export function createAudioEngine() {
       tone(1568, 0.16, 'sine', 0.05, null, 0.18);
     },
     playSmoke() {
-      noiseBurst(0.45, 780, 0.09);
+      noiseBurst(0.46, 760, 0.09);
     },
     playTap() {
       tone(640, 0.08, 'square', 0.045, 960, 0);
@@ -126,10 +127,10 @@ export function createAudioEngine() {
       tone(233, 0.42, 'sawtooth', 0.09, 110, 0.18);
     },
     playGetawayFanfare() {
-      tone(392.0, 0.22, 'triangle', 0.08, null, 0);
-      tone(493.88, 0.22, 'triangle', 0.08, null, 0.1);
+      tone(392.0, 0.24, 'triangle', 0.08, null, 0);
+      tone(493.88, 0.24, 'triangle', 0.08, null, 0.1);
       tone(587.33, 0.28, 'triangle', 0.08, null, 0.2);
-      tone(783.99, 0.55, 'sine', 0.1, null, 0.3);
+      tone(783.99, 0.56, 'sine', 0.1, null, 0.3);
     },
   };
 }

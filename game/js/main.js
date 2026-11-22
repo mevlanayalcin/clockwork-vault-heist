@@ -1,7 +1,6 @@
-// Gilded Clockwork v2 — entry point, fixed-step loop, input binding, 4-vault flow, showcase hooks.
+// Gilded Clockwork 3D — entry point, Three.js WebGL2 diorama loop, input binding, and 4-vault flow.
 
 import { WORLD_H, WORLD_W } from './vaults.js';
-import { getThemePalette } from './textures.js';
 import { findAdjacentCover } from './lighting.js';
 import { CAUGHT_GRACE_SECONDS, recomputeSecurityCones, setGuardBark } from './guards.js';
 import { GADGET_DEFS } from './gadgets.js';
@@ -14,38 +13,39 @@ import {
   stepEngine,
   triggerInteract,
 } from './engine.js';
-import { createRenderer } from './renderer.js';
-import { hitTestGadgetDock } from './hud.js';
+import { createScene3D } from './scene3d.js';
+import { drawHudOverlay, hitTestGadgetDock } from './hud.js';
 import { createAudioEngine } from './audio.js';
 
 export function bootGame() {
-  const canvas = document.getElementById('stage');
-  const renderer = createRenderer(canvas);
+  const webglCanvas = document.getElementById('webgl');
+  const hudCanvas = document.getElementById('stage');
+  const scene3d = createScene3D(webglCanvas, hudCanvas);
   const audio = createAudioEngine();
   const params = new URLSearchParams(window.location.search);
   const startVault = Math.max(0, Number(params.get('vault') || 0) | 0);
   const shotMode = params.get('shot');
 
   const state = createEngine(startVault);
-  getThemePalette(state.vault.theme);
   const input = { up: false, down: false, left: false, right: false, crouch: false, sprint: false, interact: false };
-  let crouchToggled = false;
   let frozen = false;
 
   if (shotMode) {
     frozen = applyShowcaseShot(state, shotMode);
+    state.frozenShot = frozen;
   }
 
   function syncDomTelemetry() {
-    canvas.dataset.status = state.status;
-    canvas.dataset.vault = String(state.vaultIndex);
-    canvas.dataset.x = String(Math.round(state.player.x));
-    canvas.dataset.y = String(Math.round(state.player.y));
-    canvas.dataset.loot = state.lootSecured ? '1' : '0';
-    canvas.dataset.alarm = String(Math.round(state.alarm));
-    canvas.dataset.grace = state.caughtGrace.toFixed(2);
-    canvas.dataset.toolsSpent = String(state.toolSpent);
-    canvas.dataset.trailLen = String(state.trail.length);
+    hudCanvas.dataset.status = state.status;
+    hudCanvas.dataset.vault = String(state.vaultIndex);
+    hudCanvas.dataset.x = String(Math.round(state.player.x));
+    hudCanvas.dataset.y = String(Math.round(state.player.y));
+    hudCanvas.dataset.loot = state.lootSecured ? '1' : '0';
+    hudCanvas.dataset.alarm = String(Math.round(state.alarm));
+    hudCanvas.dataset.grace = state.caughtGrace.toFixed(2);
+    hudCanvas.dataset.toolsSpent = String(state.toolSpent);
+    hudCanvas.dataset.trailLen = String(state.trail.length);
+    hudCanvas.dataset.cam = scene3d.getCameraMode();
   }
 
   function onKeyDown(e) {
@@ -59,10 +59,6 @@ export function bootGame() {
     if (code === 'KeyD' || code === 'ArrowRight') input.right = true;
     if (code === 'ShiftLeft' || code === 'ShiftRight') input.sprint = true;
     if (code === 'Space' || code === 'ControlLeft' || code === 'ControlRight') input.crouch = true;
-    if (code === 'KeyC' && !e.repeat) {
-      crouchToggled = !crouchToggled;
-      input.crouch = crouchToggled;
-    }
     if (code === 'KeyE') {
       input.interact = true;
       if (!e.repeat) triggerInteract(state, audio);
@@ -73,16 +69,22 @@ export function bootGame() {
       if (code === 'Digit2') applyGadgetKey(state, 'decoy', audio);
       if (code === 'Digit3') applyGadgetKey(state, 'smoke', audio);
       if (code === 'Digit4') applyGadgetKey(state, 'tap', audio);
+      if (code === 'KeyC') {
+        const mode = scene3d.toggleCameraMode();
+        state.flashBanner = {
+          text: mode === 'chase' ? 'CAMERA · DRAMATIC CHASE ANGLE' : 'CAMERA · ELEVATED 3/4 DIORAMA',
+          color: '#7ceeff',
+          timer: 1.4,
+        };
+      }
       if (code === 'KeyR') {
         frozen = false;
-        crouchToggled = false;
-        input.crouch = false;
+        state.frozenShot = false;
         loadVault(state, state.vaultIndex);
       }
       if (code === 'KeyN' && state.status === 'EXTRACTED') {
         frozen = false;
-        crouchToggled = false;
-        input.crouch = false;
+        state.frozenShot = false;
         loadVault(state, (state.vaultIndex + 1) % state.vaultCount);
       }
       if (code === 'KeyM') audio.toggleMute();
@@ -97,12 +99,12 @@ export function bootGame() {
     if (code === 'KeyA' || code === 'ArrowLeft') input.left = false;
     if (code === 'KeyD' || code === 'ArrowRight') input.right = false;
     if (code === 'ShiftLeft' || code === 'ShiftRight') input.sprint = false;
-    if (code === 'Space' || code === 'ControlLeft' || code === 'ControlRight') input.crouch = crouchToggled;
+    if (code === 'Space' || code === 'ControlLeft' || code === 'ControlRight') input.crouch = false;
     if (code === 'KeyE') input.interact = false;
   }
 
   function onPointerMove(e) {
-    const pt = renderer.screenToWorld(e.clientX, e.clientY);
+    const pt = scene3d.screenToWorld(e.clientX, e.clientY);
     state.pointer.x = Math.max(0, Math.min(WORLD_W, pt.x));
     state.pointer.y = Math.max(0, Math.min(WORLD_H, pt.y));
     state.pointer.active = true;
@@ -110,16 +112,17 @@ export function bootGame() {
 
   function onPointerDown(e) {
     audio.unlock();
-    const pt = renderer.screenToWorld(e.clientX, e.clientY);
-    state.pointer.x = pt.x;
-    state.pointer.y = pt.y;
-    state.pointer.active = true;
-
-    const dockIdx = hitTestGadgetDock(pt.x, pt.y);
+    const hp = scene3d.screenToHud(e.clientX, e.clientY);
+    const dockIdx = hitTestGadgetDock(hp.x, hp.y);
     if (dockIdx >= 0 && dockIdx < GADGET_DEFS.length) {
       applyGadgetKey(state, GADGET_DEFS[dockIdx].id, audio);
       return;
     }
+
+    const pt = scene3d.screenToWorld(e.clientX, e.clientY);
+    state.pointer.x = pt.x;
+    state.pointer.y = pt.y;
+    state.pointer.active = true;
 
     if (state.status === 'EXTRACTED') {
       loadVault(state, (state.vaultIndex + 1) % state.vaultCount);
@@ -134,10 +137,10 @@ export function bootGame() {
 
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('resize', () => renderer.resize());
-  canvas.addEventListener('pointermove', onPointerMove);
-  canvas.addEventListener('pointerdown', onPointerDown);
-  canvas.focus();
+  window.addEventListener('resize', () => scene3d.resize());
+  hudCanvas.addEventListener('pointermove', onPointerMove);
+  hudCanvas.addEventListener('pointerdown', onPointerDown);
+  hudCanvas.focus();
 
   let lastTs = performance.now();
   function frame(now) {
@@ -148,18 +151,18 @@ export function bootGame() {
       if (state.status === 'PLAYING') audio.tickTension(state.alarm, dt);
     }
     syncDomTelemetry();
-    renderer.render(state, audio.isMuted());
+    scene3d.syncAndRender(state, drawHudOverlay, audio.isMuted());
     requestAnimationFrame(frame);
   }
 
   syncDomTelemetry();
-  renderer.render(state, audio.isMuted());
+  scene3d.syncAndRender(state, drawHudOverlay, audio.isMuted());
   requestAnimationFrame(frame);
 }
 
 function applyShowcaseShot(state, shot) {
   if (shot === 'infiltration') {
-    // Vault 1: The Horology Atrium (Obsidian marble & gilded gold compass rose)
+    // Vault 1: The Horology Atrium 3D
     loadVault(state, 0);
     state.time = 11.2;
     state.elapsed = 11.2;
@@ -195,7 +198,7 @@ function applyShowcaseShot(state, shot) {
   }
 
   if (shot === 'emerald-emp') {
-    // Vault 2: The Emerald Conservatory (Emerald stone & warm walnut parquet!)
+    // Vault 2: The Emerald Conservatory 3D
     loadVault(state, 1);
     state.time = 23.6;
     state.elapsed = 23.6;
@@ -230,7 +233,6 @@ function applyShowcaseShot(state, shot) {
       ],
     });
     spawnParticles(state, 812, 358, '#46ecff', 14, 140);
-    // Spinning Clockwork Decoy luring two investigating guards away
     state.decoys.push({ x: 528, y: 540, lureRadius: 280, timer: 4.6, maxTimer: 6.5, pulsePhase: 1.7 });
     state.guards[0].x = 742;
     state.guards[0].y = 168;
@@ -265,26 +267,25 @@ function applyShowcaseShot(state, shot) {
   }
 
   if (shot === 'treasury-smoke') {
-    // Vault 3: The Imperial Treasury (Crimson-mahogany & dark slate mosaic!)
+    // Vault 3: The Imperial Treasury 3D
     loadVault(state, 2);
     state.time = 19.8;
     state.elapsed = 19.8;
     state.alarm = 78;
     state.peakAlarm = 78;
-    state.player.x = 618;
-    state.player.y = 266;
+    state.player.x = 582;
+    state.player.y = 272;
     state.player.angle = 2.66;
     state.player.crouched = false;
     state.caughtGrace = CAUGHT_GRACE_SECONDS - 0.7;
-    state.spottedBy = { kind: 'guard', x: 764, y: 256, label: 'WARDEN MARLOW' };
+    state.spottedBy = { kind: 'guard', x: 786, y: 256, label: 'WARDEN MARLOW' };
     state.lastSeen = { x: 406, y: 274, timer: 4.2 };
     state.gadgets[2].remaining = 1;
     state.gadgets[2].used = 1;
     state.toolSpent = 30000;
     state.activeGadgetId = 'smoke';
-    // Volumetric smoke cloud visibly severing alerted guard & camera cones while keeping scepter clear!
     state.smokes.push({ x: 814, y: 408, radius: 96, timer: 5.4, maxTimer: 7.0, alpha: 0.96 });
-    state.guards[0].x = 764;
+    state.guards[0].x = 786;
     state.guards[0].y = 256;
     state.guards[0].angle = 3.07;
     state.guards[0].state = 'ALERT';
@@ -309,29 +310,27 @@ function applyShowcaseShot(state, shot) {
   }
 
   if (shot === 'getaway') {
-    loadVault(state, 0);
-    state.time = 24.4;
-    state.elapsed = 24.4;
-    state.alarm = 16;
-    state.peakAlarm = 18;
+    loadVault(state, 3);
+    state.time = 17.2;
+    state.elapsed = 17.2;
+    state.alarm = 4;
+    state.peakAlarm = 8;
     state.loot.taken = true;
     state.lootSecured = true;
     state.collectedValue = state.loot.value;
-    state.relays[0].hacked = true;
-    state.lasers[0].disabled = true;
     state.player.x = state.exit.x;
     state.player.y = state.exit.y;
     state.trail = [
-      { x: 96, y: 582, crouched: false, ventJump: false, secured: false },
-      { x: 112, y: 368, crouched: true, ventJump: false, secured: false },
-      { x: 342, y: 358, crouched: true, ventJump: false, secured: false },
-      { x: 342, y: 116, crouched: true, ventJump: false, secured: false },
-      { x: 428, y: 116, crouched: true, ventJump: false, secured: false },
-      { x: 640, y: 214, crouched: true, ventJump: false, secured: false },
-      { x: 640, y: 358, crouched: false, ventJump: false, secured: true },
-      { x: 947, y: 358, crouched: false, ventJump: false, secured: true },
-      { x: 1004, y: 214, crouched: false, ventJump: false, secured: true },
-      { x: 1172, y: 136, crouched: false, ventJump: false, secured: true },
+      { x: 98, y: 580, crouched: false, ventJump: false, secured: false },
+      { x: 286, y: 466, crouched: true, ventJump: false, secured: false },
+      { x: 294, y: 134, crouched: true, ventJump: false, secured: false },
+      { x: 480, y: 128, crouched: true, ventJump: false, secured: false },
+      { x: 992, y: 590, crouched: true, ventJump: true, secured: false },
+      { x: 1112, y: 358, crouched: false, ventJump: false, secured: true },
+      { x: 992, y: 590, crouched: false, ventJump: false, secured: true },
+      { x: 480, y: 128, crouched: false, ventJump: true, secured: true },
+      { x: 294, y: 246, crouched: false, ventJump: false, secured: true },
+      { x: 102, y: 136, crouched: false, ventJump: false, secured: true },
     ];
     state.status = 'EXTRACTED';
     state.summary = buildHeistSummary(state);

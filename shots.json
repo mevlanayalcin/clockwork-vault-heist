@@ -1,5 +1,6 @@
 [
-  { "name": "1-start.jpg", "query": "?shot=start&seed=1" },
-  { "name": "2-play.jpg", "query": "?shot=play&seed=1" },
-  { "name": "3-end.jpg", "query": "?shot=end&seed=1" }
+  { "name": "1-heist-infiltration.jpg", "query": "?shot=infiltration" },
+  { "name": "2-tool-breach-alarm.jpg", "query": "?shot=breach" },
+  { "name": "3-caught-fair-recovery.jpg", "query": "?shot=caught" },
+  { "name": "4-getaway-payoff.jpg", "query": "?shot=getaway" }
 ]
